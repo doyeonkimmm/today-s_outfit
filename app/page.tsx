@@ -12,6 +12,7 @@ type SavedLook = { id: string; top: Item; bottom: Item; date: string; weather?: 
 const seasonNames: Record<Season, string> = { spring: "봄", summer: "여름", autumn: "가을", winter: "겨울" };
 const todayKey = () => new Date().toLocaleDateString("sv-SE");
 const fullDate = (value: string) => new Intl.DateTimeFormat("ko-KR", { month: "long", day: "numeric", weekday: "long" }).format(new Date(`${value}T12:00:00`));
+const assetPath = (name: string) => `${import.meta.env.BASE_URL}assets/${name}`;
 
 function optimizeImage(file: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -55,7 +56,7 @@ function optimizeImage(file: Blob): Promise<string> {
 
 function Garment({ item, type, adjusted = true, offsetRatio = 1 }: { item?: Item; type: Category; adjusted?: boolean; offsetRatio?: number }) {
   if (item?.image) return <div className={`garment-frame ${type}`}><img className={`garment-image ${type}`} style={adjusted ? { transform:`translateY(${(item.offsetY ?? 0) * offsetRatio}px) scale(${item.scale ?? 1})` } as CSSProperties : undefined} src={item.image} alt={type === "top" ? "상의" : "하의"} /></div>;
-  return <div className={`garment-frame ${type}`}><img className={`empty-garment ${type}`} src={type === "top" ? "/assets/shirt.svg" : "/assets/pants.svg"} alt="등록된 옷 없음" /></div>;
+  return <div className={`garment-frame ${type}`}><img className={`empty-garment ${type}`} src={assetPath(type === "top" ? "shirt.svg" : "pants.svg")} alt="등록된 옷 없음" /></div>;
 }
 
 function OutfitPreview({ look, offsetRatio = 1, topOffsetRatio }: { look: { top: Item; bottom: Item }; offsetRatio?: number; topOffsetRatio?: number }) {
@@ -277,7 +278,7 @@ export default function Home() {
 
     {addOpen && <div className="add-overlay"><section className="add-screen">
       <div className="add-heading"><h2>{editingId ? "옷 수정" : "옷 추가"}</h2><button onClick={() => { setAddOpen(false); setEditingId(undefined); }}>닫기</button></div>
-      <button className="upload-frame" onClick={() => fileRef.current?.click()}>{newImage ? <img src={newImage} alt="미리보기" style={{ transform:`translateY(${newOffsetY / 10}px) scale(${newScale})` }} /> : <><img src="/assets/shirt.svg" alt="" /><span>사진 선택</span></>}</button>
+      <button className="upload-frame" onClick={() => fileRef.current?.click()}>{newImage ? <img src={newImage} alt="미리보기" style={{ transform:`translateY(${newOffsetY / 10}px) scale(${newScale})` }} /> : <><img src={assetPath("shirt.svg")} alt="" /><span>사진 선택</span></>}</button>
       <input ref={fileRef} type="file" hidden accept="image/*" onChange={readImage} />
       {newImage && <div className="image-adjustments">
         <label><span>크기</span><input type="range" min="30" max="140" value={Math.round(newScale * 100)} onChange={event => setNewScale(Number(event.target.value) / 100)} /></label>
