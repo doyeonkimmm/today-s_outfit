@@ -1,6 +1,7 @@
 "use client";
 
 import { ChangeEvent, CSSProperties, useEffect, useMemo, useRef, useState } from "react";
+import { deleteStoredImage, loadStoredImage, saveStoredImage } from "./imageStore";
 
 type Tab = "style" | "closet" | "calendar";
 type Category = "top" | "bottom";
@@ -55,7 +56,7 @@ function optimizeImage(file: Blob): Promise<string> {
 }
 
 function Garment({ item, type, adjusted = true, offsetRatio = 1 }: { item?: Item; type: Category; adjusted?: boolean; offsetRatio?: number }) {
-  if (item?.image) return <div className={`garment-frame ${type}`}><img className={`garment-image ${type}`} style={adjusted ? { transform:`translateY(${(item.offsetY ?? 0) * offsetRatio}px) scale(${item.scale ?? 1})` } as CSSProperties : undefined} src={item.image} alt={type === "top" ? "상의" : "하의"} /></div>;
+  if (item?.image) return <div className={`garment-frame ${type}`}><img className={`garment-image ${type}`} loading="lazy" decoding="async" style={adjusted ? { transform:`translateY(${(item.offsetY ?? 0) * offsetRatio}px) scale(${item.scale ?? 1})` } as CSSProperties : undefined} src={item.image} alt={type === "top" ? "상의" : "하의"} /></div>;
   return <div className={`garment-frame ${type}`}><img className={`empty-garment ${type}`} src={assetPath(type === "top" ? "shirt.svg" : "pants.svg")} alt="등록된 옷 없음" /></div>;
 }
 
@@ -90,53 +91,62 @@ export default function Home() {
   const [newScale, setNewScale] = useState(1);
   const [newOffsetY, setNewOffsetY] = useState(0);
   const [editingId, setEditingId] = useState<string>();
+  const [storageReady, setStorageReady] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    try {
-      const storedName = localStorage.getItem("oneulmoipji-name-v5") || "";
-      const saved = localStorage.getItem("oneulmoipji-data");
-      if (storedName) { setName(storedName); setDraftName(storedName); setIntro("done"); }
-      if (saved) {
-        const data = JSON.parse(saved);
-        const loadedItems = (data.items || []).filter((item: Item) => Boolean(item.image));
-        const itemMap = new Map<string, Item>(loadedItems.map((item: Item) => [item.id, item]));
-        const hydrate = (look: SavedLook): SavedLook => ({ ...look, top: itemMap.get(look.top.id) || look.top, bottom: itemMap.get(look.bottom.id) || look.bottom });
-        setItems(loadedItems);
-        setTodayLooks((data.todayLooks || []).map(hydrate));
-        setWishLooks((data.wishLooks || []).map(hydrate));
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const storedName = localStorage.getItem("oneulmoipji-name-v5") || "";
+        const saved = localStorage.getItem("oneulmoipji-data");
+        if (storedName) { setName(storedName); setDraftName(storedName); setIntro("done"); }
+        if (saved) {
+          const data = JSON.parse(saved);
+          const rawItems: Item[] = data.items || [];
+          const lookItems: Item[] = [...(data.todayLooks || []), ...(data.wishLooks || [])].flatMap((look: SavedLook) => [look.top, look.bottom]);
+          const candidates = [...new Map([...rawItems, ...lookItems].map(item => [item.id, item])).values()];
+          const hydratedItems: Item[] = [];
+
+          // Existing data-URL photos are migrated one at a time to avoid memory spikes on phones.
+          for (const item of candidates) {
+            let blob = await loadStoredImage(item.id);
+            if (!blob && item.image) {
+              const original = await (await fetch(item.image)).blob();
+              const optimized = item.image.startsWith("data:image/webp") ? item.image : await optimizeImage(original);
+              blob = await (await fetch(optimized)).blob();
+              await saveStoredImage(item.id, blob);
+            }
+            if (blob) hydratedItems.push({ ...item, image: URL.createObjectURL(blob) });
+          }
+
+          if (cancelled) return;
+          const itemMap = new Map<string, Item>(hydratedItems.map(item => [item.id, item]));
+          const hydrate = (look: SavedLook): SavedLook => ({ ...look, top: itemMap.get(look.top.id) || look.top, bottom: itemMap.get(look.bottom.id) || look.bottom });
+          setItems(rawItems.map(item => itemMap.get(item.id)).filter(Boolean) as Item[]);
+          setTodayLooks((data.todayLooks || []).map(hydrate));
+          setWishLooks((data.wishLooks || []).map(hydrate));
+        }
+      } catch {
+        setToast("사진 저장소를 불러오지 못했습니다");
+      } finally {
+        if (!cancelled) setStorageReady(true);
       }
-    } catch {}
+    };
+    load();
+    return () => { cancelled = true; };
   }, []);
 
   useEffect(() => {
+    if (!storageReady) return;
     const withoutImage = (item: Item): Item => ({ ...item, image: undefined });
     const compactLook = (look: SavedLook): SavedLook => ({ ...look, top: withoutImage(look.top), bottom: withoutImage(look.bottom) });
     try {
-      localStorage.setItem("oneulmoipji-data", JSON.stringify({ items, todayLooks: todayLooks.map(compactLook), wishLooks: wishLooks.map(compactLook) }));
+      localStorage.setItem("oneulmoipji-data", JSON.stringify({ items: items.map(withoutImage), todayLooks: todayLooks.map(compactLook), wishLooks: wishLooks.map(compactLook) }));
     } catch {
       setToast("저장 공간이 부족합니다. 큰 사진을 삭제해주세요");
     }
-  }, [items, todayLooks, wishLooks]);
-
-  useEffect(() => {
-    if (!items.some(item => item.image && !item.image.startsWith("data:image/webp"))) return;
-    let cancelled = false;
-    Promise.all(items.map(async item => {
-      if (!item.image || item.image.startsWith("data:image/webp")) return item;
-      try {
-        const blob = await (await fetch(item.image)).blob();
-        return { ...item, image: await optimizeImage(blob) };
-      } catch { return item; }
-    })).then(normalized => {
-      if (cancelled) return;
-      const itemMap = new Map(normalized.map(item => [item.id, item]));
-      setItems(normalized);
-      setTodayLooks(looks => looks.map(look => ({ ...look, top: itemMap.get(look.top.id) || look.top, bottom: itemMap.get(look.bottom.id) || look.bottom })));
-      setWishLooks(looks => looks.map(look => ({ ...look, top: itemMap.get(look.top.id) || look.top, bottom: itemMap.get(look.bottom.id) || look.bottom })));
-    });
-    return () => { cancelled = true; };
-  }, [items]);
+  }, [storageReady, items, todayLooks, wishLooks]);
 
   useEffect(() => {
     const load = async (lat = 37.5665, lon = 126.978) => {
@@ -181,18 +191,37 @@ export default function Home() {
     try { setNewImage(await optimizeImage(file)); }
     catch { notify("이미지를 불러오지 못했습니다"); }
   };
-  const addItem = () => {
+  const addItem = async () => {
     if (!newImage) return notify("사진을 선택해주세요");
-    if (editingId) {
-      const changes = { category:newCategory, image:newImage, seasons:newSeasons, scale:newScale, offsetY:newOffsetY };
-      setItems(value => value.map(item => item.id === editingId ? { ...item, ...changes } : item));
-      const updateLooks = (looks: SavedLook[]) => looks.map(look => ({ ...look, top:look.top.id === editingId ? { ...look.top, ...changes, category:"top" } : look.top, bottom:look.bottom.id === editingId ? { ...look.bottom, ...changes, category:"bottom" } : look.bottom }));
-      setTodayLooks(updateLooks); setWishLooks(updateLooks);
-    } else setItems(value => [{ id: crypto.randomUUID(), category: newCategory, image: newImage, seasons: newSeasons, createdAt: Date.now(), scale: newScale, offsetY: newOffsetY }, ...value]);
-    setNewImage(undefined); setNewScale(1); setNewOffsetY(0); setEditingId(undefined); setAddOpen(false); notify(editingId ? "수정했습니다" : "추가했습니다");
+    try {
+      const id = editingId || crypto.randomUUID();
+      const blob = await (await fetch(newImage)).blob();
+      await saveStoredImage(id, blob);
+      const storedUrl = URL.createObjectURL(blob);
+      navigator.storage?.persist?.().catch(() => false);
+      if (editingId) {
+        const changes = { category:newCategory, image:storedUrl, seasons:newSeasons, scale:newScale, offsetY:newOffsetY };
+        setItems(value => value.map(item => item.id === editingId ? { ...item, ...changes } : item));
+        const updateLooks = (looks: SavedLook[]) => looks.map(look => ({ ...look, top:look.top.id === editingId ? { ...look.top, ...changes, category:"top" as const } : look.top, bottom:look.bottom.id === editingId ? { ...look.bottom, ...changes, category:"bottom" as const } : look.bottom }));
+        setTodayLooks(updateLooks); setWishLooks(updateLooks);
+      } else {
+        setItems(value => [{ id, category: newCategory, image: storedUrl, seasons: newSeasons, createdAt: Date.now(), scale: newScale, offsetY: newOffsetY }, ...value]);
+      }
+      setNewImage(undefined); setNewScale(1); setNewOffsetY(0); setEditingId(undefined); setAddOpen(false); notify(editingId ? "수정했습니다" : "추가했습니다");
+    } catch {
+      notify("사진 저장에 실패했습니다");
+    }
   };
   const openNewItem = () => { setEditingId(undefined); setNewImage(undefined); setNewScale(1); setNewOffsetY(0); setNewCategory("top"); setNewSeasons(["spring", "summer", "autumn", "winter"]); setAddOpen(true); };
   const editItem = (item: Item) => { setEditingId(item.id); setNewImage(item.image); setNewScale(item.scale ?? 1); setNewOffsetY(item.offsetY ?? 0); setNewCategory(item.category); setNewSeasons(item.seasons); setAddOpen(true); };
+  const removeItem = (item: Item) => {
+    setItems(value => value.filter(row => row.id !== item.id));
+    const usedBySavedLook = [...todayLooks, ...wishLooks].some(look => look.top.id === item.id || look.bottom.id === item.id);
+    if (!usedBySavedLook) {
+      deleteStoredImage(item.id).catch(() => undefined);
+      if (item.image?.startsWith("blob:")) URL.revokeObjectURL(item.image);
+    }
+  };
 
   const monthCells = useMemo(() => {
     const first = new Date(month.getFullYear(), month.getMonth(), 1).getDay();
@@ -244,7 +273,7 @@ export default function Home() {
       <div className="closet-heading"><h1>{name}의 옷장</h1><button onClick={openNewItem}>옷 추가</button></div>
       <div className="closet-tabs"><button onClick={() => setClosetTab("top")}>상의</button><button onClick={() => setClosetTab("bottom")}>하의</button><button onClick={() => setClosetTab("wish")}>저장</button></div>
       <div className="closet-scroll">
-        {closetTab !== "wish" ? <div className="closet-grid">{items.filter(item => item.category === closetTab).map(item => <article className="closet-card" key={item.id}><div><Garment item={item} type={item.category} adjusted={false} /></div><div className="closet-card-actions"><button onClick={() => editItem(item)}>수정</button><button onClick={() => setItems(value => value.filter(row => row.id !== item.id))}>삭제</button></div></article>)}</div>
+        {closetTab !== "wish" ? <div className="closet-grid">{items.filter(item => item.category === closetTab).map(item => <article className="closet-card" key={item.id}><div><Garment item={item} type={item.category} adjusted={false} /></div><div className="closet-card-actions"><button onClick={() => editItem(item)}>수정</button><button onClick={() => removeItem(item)}>삭제</button></div></article>)}</div>
         : <div className="saved-grid">{wishLooks.map(look => <SavedCard key={look.id} look={look} onWear={() => { setTodayLooks(value => [{ ...look, id: crypto.randomUUID(), date: todayKey(), weather }, ...value.filter(item => item.date !== todayKey())]); notify("오늘의 코디로 저장했습니다"); }} onDelete={() => setWishLooks(value => value.filter(item => item.id !== look.id))} compact />)}{!wishLooks.length && <p className="boxed-empty">저장된 코디가 없습니다</p>}</div>}
       </div>
     </section>}
